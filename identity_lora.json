@@ -1,0 +1,423 @@
+{
+  "dataset": {
+    "train": 136,
+    "validate": 16
+  },
+  "runtime": {
+    "device": "auto",
+    "batch_size": 32,
+    "workers": 8,
+    "output_mode": "copy"
+  },
+  "models": {
+    "embedding": "facebook/dinov2-small",
+    "tagger": {
+      "repo": "SmilingWolf/wd-swinv2-tagger-v3",
+      "revision": "627aef95638667ddcaa3ac8ae625e88ea5b02f51",
+      "selected_tags_sha256": "298633d94d0031d2081c0893f29c82eab7f0df00b08483ba8f29d1e979441217"
+    }
+  },
+  "audit": {
+    "min_side": 512,
+    "max_aspect": 3.0,
+    "brisque": {
+      "enabled": true,
+      "weight": 0.15
+    },
+    "focus": {
+      "fail_risk": 0.7,
+      "soft_risk_start": 0.52,
+      "semantic_hard": 0.45,
+      "semantic_corroborated": 0.3,
+      "semantic_corroboration_risk": 0.55
+    }
+  },
+  "dedup": {
+    "phash_distance": 8,
+    "pixel_difference": 0.08,
+    "dino_similarity": 0.985,
+    "dino_phash_distance": 16
+  },
+  "burst": {
+    "enabled": true,
+    "gap_seconds": 5.0,
+    "max_span_seconds": 20.0,
+    "use_exif": true,
+    "use_filename": true,
+    "use_mtime": false,
+    "repeat_penalty": 0.08
+  },
+  "semantic": {
+    "evidence_floor": 0.2,
+    "availability_capture": 0.75,
+    "categories": [
+      {
+        "name": "face_profile",
+        "group": "head_view",
+        "weight": 1.15,
+        "target_fraction": 0.06,
+        "tags": [
+          "profile"
+        ]
+      },
+      {
+        "name": "body_side",
+        "group": "body_view",
+        "weight": 1.3,
+        "target_fraction": 0.08,
+        "tags": [
+          "from_side"
+        ]
+      },
+      {
+        "name": "body_rear",
+        "group": "body_view",
+        "weight": 1.3,
+        "target_fraction": 0.08,
+        "tags": [
+          "from_behind",
+          "facing_away"
+        ]
+      },
+      {
+        "name": "from_above",
+        "group": "camera",
+        "weight": 1.1,
+        "target_fraction": 0.05,
+        "tags": [
+          "from_above"
+        ]
+      },
+      {
+        "name": "from_below",
+        "group": "camera",
+        "weight": 1.2,
+        "target_fraction": 0.06,
+        "tags": [
+          "from_below"
+        ]
+      },
+      {
+        "name": "full_body",
+        "group": "framing",
+        "weight": 1.25,
+        "target_fraction": 0.3,
+        "tags": [
+          "full_body"
+        ]
+      },
+      {
+        "name": "sitting",
+        "group": "pose",
+        "weight": 0.7,
+        "target_fraction": 0.1,
+        "tags": [
+          "sitting"
+        ]
+      },
+      {
+        "name": "lying",
+        "group": "pose",
+        "weight": 0.85,
+        "target_fraction": 0.1,
+        "tags": [
+          "lying",
+          "on_back",
+          "on_side",
+          "on_stomach"
+        ]
+      },
+      {
+        "name": "kneeling_crouching",
+        "group": "pose",
+        "weight": 0.9,
+        "target_fraction": 0.05,
+        "tags": [
+          "kneeling",
+          "squatting"
+        ]
+      },
+      {
+        "name": "foreshortening",
+        "group": "geometry",
+        "weight": 1.3,
+        "target_fraction": 0.04,
+        "tags": [
+          "foreshortening"
+        ]
+      },
+      {
+        "name": "dynamic_pose",
+        "group": "geometry",
+        "weight": 0.8,
+        "target_fraction": 0.07,
+        "tags": [
+          "arms_up",
+          "arms_behind_head",
+          "arched_back",
+          "leaning_forward",
+          "bent_over",
+          "leg_up",
+          "knee_up"
+        ]
+      },
+      {
+        "name": "strong_expression",
+        "group": "expression",
+        "weight": 0.85,
+        "target_fraction": 0.08,
+        "tags": [
+          "open_mouth",
+          "laughing",
+          "surprised",
+          "tongue_out",
+          "frown",
+          "angry",
+          "crying",
+          "squinting",
+          "grimace",
+          "grin",
+          "screaming",
+          "crazy_smile"
+        ]
+      },
+      {
+        "name": "glasses",
+        "group": "accessory",
+        "weight": 0.75,
+        "target_fraction": 0.05,
+        "source_scale": 0.85,
+        "max_target_fraction": 0.85,
+        "tags": [
+          "glasses",
+          "bespectacled"
+        ]
+      },
+      {
+        "name": "object_interaction",
+        "group": "hands_contact",
+        "weight": 0.9,
+        "target_fraction": 0.04,
+        "tags": [
+          "holding"
+        ],
+        "prefixes": [
+          "holding_"
+        ],
+        "exclude_tags": [
+          "holding_hands",
+          "holding_hair",
+          "holding_head",
+          "holding_leg",
+          "holding_legs",
+          "holding_breath",
+          "holding_behind_back",
+          "holding_with_feet",
+          "holding_with_tail"
+        ],
+        "exclude_prefixes": [
+          "holding_own_",
+          "holding_another's_"
+        ]
+      },
+      {
+        "name": "hand_activity",
+        "group": "hands_contact",
+        "weight": 0.95,
+        "target_fraction": 0.06,
+        "tags": [
+          "outstretched_hand",
+          "hands_on_own_hips",
+          "holding",
+          "grabbing"
+        ],
+        "prefixes": [
+          "hand_on_",
+          "holding_",
+          "grabbing_"
+        ]
+      },
+      {
+        "name": "weight_bearing_hands",
+        "group": "hands_contact",
+        "weight": 1.0,
+        "target_fraction": 0.02,
+        "tags": [
+          "all_fours",
+          "crawling",
+          "arm_support"
+        ]
+      },
+      {
+        "name": "social_contact",
+        "group": "hands_contact",
+        "weight": 0.85,
+        "target_fraction": 0.04,
+        "tags": [
+          "sitting_on_person",
+          "spooning",
+          "hug",
+          "kiss",
+          "holding_hands",
+          "arm_around_waist",
+          "arm_around_shoulder",
+          "arms_around_neck"
+        ]
+      },
+      {
+        "name": "clothing_present",
+        "group": "clothing",
+        "weight": 0.75,
+        "target_fraction": 0.2,
+        "source_scale": 0.65,
+        "max_target_fraction": 0.55,
+        "tags": [
+          "shirt",
+          "pants",
+          "jeans",
+          "dress",
+          "skirt",
+          "jacket",
+          "sweater",
+          "shorts",
+          "coat",
+          "hoodie",
+          "blouse",
+          "t-shirt",
+          "tank_top",
+          "crop_top",
+          "suit",
+          "uniform",
+          "school_uniform",
+          "overalls",
+          "bodysuit",
+          "leotard",
+          "vest",
+          "cardigan",
+          "collared_shirt"
+        ]
+      },
+      {
+        "name": "light_clothing",
+        "group": "clothing",
+        "weight": 0.55,
+        "target_fraction": 0.08,
+        "source_scale": 0.45,
+        "max_target_fraction": 0.3,
+        "tags": [
+          "bikini",
+          "swimsuit",
+          "tank_top",
+          "crop_top",
+          "shorts"
+        ]
+      },
+      {
+        "name": "open_stance",
+        "group": "geometry",
+        "weight": 0.8,
+        "target_fraction": 0.05,
+        "source_scale": 0.35,
+        "max_target_fraction": 0.18,
+        "tags": [
+          "legs_apart"
+        ]
+      }
+    ],
+    "penalties": [
+      {
+        "name": "identity_weak_crop",
+        "weight": 0.12,
+        "tags": [
+          "head_out_of_frame",
+          "faceless",
+          "headless"
+        ]
+      },
+      {
+        "name": "cropped_extremities",
+        "weight": 0.07,
+        "tags": [
+          "cropped_legs",
+          "feet_out_of_frame",
+          "foot_out_of_frame",
+          "cropped_arms"
+        ]
+      },
+      {
+        "name": "body_artifact",
+        "weight": 0.12,
+        "tags": [
+          "bad_anatomy",
+          "bad_hands",
+          "bad_feet",
+          "bad_proportions",
+          "fewer_digits",
+          "extra_arms",
+          "missing_limb",
+          "wrong_foot"
+        ]
+      },
+      {
+        "name": "face_occlusion",
+        "weight": 0.1,
+        "tags": [
+          "covering_face",
+          "covered_face",
+          "hand_over_face"
+        ]
+      },
+      {
+        "name": "multi_person",
+        "weight": 0.08,
+        "tags": [
+          "2girls",
+          "multiple_girls",
+          "1boy",
+          "2boys",
+          "multiple_boys",
+          "couple",
+          "hetero",
+          "yuri",
+          "yaoi"
+        ]
+      },
+      {
+        "name": "censoring",
+        "weight": 0.3,
+        "hard_threshold": 0.65,
+        "tags": [
+          "censored",
+          "mosaic_censoring",
+          "bar_censor",
+          "convenient_censoring"
+        ]
+      },
+      {
+        "name": "semantic_blur",
+        "weight": 0.0,
+        "tags": [
+          "blurry",
+          "motion_blur"
+        ]
+      }
+    ],
+    "presence_threshold": 0.3
+  },
+  "selection": {
+    "quality_weight": 0.3,
+    "coverage_weight": 0.5,
+    "novelty_weight": 0.2,
+    "coverage_top_groups": 3,
+    "novelty_similarity_start": 0.94,
+    "redundancy_similarity_start": 0.965,
+    "redundancy_penalty": 0.12,
+    "soft_focus_penalty": 0.12,
+    "semantic_penalty_cap": 0.3
+  },
+  "validation": {
+    "near_duplicate_similarity": 0.98,
+    "near_duplicate_phash_distance": 24,
+    "same_burst_similarity": 0.95
+  }
+}
