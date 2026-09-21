@@ -1,0 +1,10 @@
+numpy
+scipy
+Pillow
+torch
+torchvision
+transformers
+scikit-learn
+timm
+huggingface-hub
+piq
