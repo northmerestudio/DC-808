@@ -1,38 +1,16 @@
-# Image Curator
+# DC-808
 
-This script automatically selects a good, varied set of images from a larger image collection.
+DC-808 is a tool for automatically selecting a good, varied set of images from a larger character image collection.
 
-It is intended for preparing an image dataset for an identity/character LoRA. It filters unsuitable images, removes duplicates and very similar images, and tries to keep a useful variety of poses, views, and image types.
+Unlike simple filtering or random selection, it looks at the dataset as a whole. It removes unsuitable and duplicate images while trying to preserve useful variety across poses, views, framing, expressions, and other visual characteristics.
 
-Your original image folder is not modified.
+### The idea
 
-## Installation
+Audit the images → remove duplicates → compare the dataset → select a balanced subset
 
-Install Python 3, then open a Terminal or Command Prompt in the folder containing the script.
+DC-808 is designed to reduce the manual work involved in preparing character LoRA datasets while keeping the resulting image set varied and easy to review.
 
-Install the required packages:
-
-```bash
-pip install -r requirements.txt
-```
-
-## Prepare your images
-
-Put all images you want to process into one folder.
-
-For example:
-
-```text
-my_images/
-```
-
-Subfolders are also supported.
-
-Common formats such as JPG, PNG, WebP, BMP, TIFF, and AVIF are supported.
-
-## Run
-
-Use:
+## Usage
 
 ```bash
 python main.py SOURCE OUTPUT
@@ -44,25 +22,15 @@ For example:
 python main.py my_images curated_images
 ```
 
-`my_images` is the folder containing the original images.
-
-`curated_images` is the folder where the selected images will be written.
-
-If you are using a custom config file:
+A custom configuration file can also be supplied:
 
 ```bash
 python main.py my_images curated_images --config identity_lora.json
 ```
 
-Full folder paths can also be used:
+The original source folder is not modified.
 
-```bash
-python main.py "/path/to/my/images" "/path/to/output"
-```
-
-## Output
-
-After the script finishes, the output folder contains:
+Selected images are written to separate training and validation folders:
 
 ```text
 curated_images/
@@ -71,16 +39,16 @@ curated_images/
 └── debug.csv
 ```
 
-`train/` contains the selected training images.
+`debug.csv` contains additional information about how the images were evaluated and selected.
 
-`validate/` contains the validation images.
+# Contributing
 
-`debug.csv` contains additional information about how each image was evaluated and can be useful for troubleshooting.
+Contributions are welcome! Please fork the repository and submit pull requests.
 
-## Notes
+# License
 
-The first run may need an internet connection to download the models used for image analysis.
+This project is licensed under the MIT License.
 
-A compatible GPU can make processing faster, but the script can also run on the CPU.
+# Acknowledgements
 
-The output folder must be different from the source image folder.
+Martin Bosgra: Author and primary maintainer of the project.
