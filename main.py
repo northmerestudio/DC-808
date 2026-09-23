@@ -2,7 +2,7 @@
 """Lean identity/character LoRA image curator.
 
 Pipeline:
-  1) audit technical signals and capture-time bursts
+  1) audit technical signals, capture-time bursts, and optional virtual crops
   2) remove pHash/pixel duplicates
   3) embed whole frames with DINOv2 and remove conservative near-duplicates
   4) tag with a pinned WD14 model and validate every configured tag/prefix
@@ -15,7 +15,7 @@ The source directory is never modified. Output contains:
   OUTPUT/debug.csv
 
 Dependencies:
-  pip install pillow numpy scipy torch transformers timm huggingface_hub scikit-learn
+  pip install pillow numpy scipy torch transformers timm huggingface_hub scikit-learn opencv-python
 Optional (used as a soft quality signal only):
   pip install piq
 """
@@ -48,6 +48,14 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".a
 @dataclass
 class Record:
     path: str
+    record_id: str = ""
+    source_id: str = ""
+    kind: str = "original"
+    crop_box: tuple[int, int, int, int] | None = None
+    view_index: int = 0
+    detector_confidence: float = math.nan
+    detected_width: int = 0
+    detected_height: int = 0
     width: int = 0
     height: int = 0
     min_side: int = 0
@@ -141,7 +149,7 @@ def load_config(path: Path) -> dict[str, Any]:
     cfg = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(cfg, dict):
         raise RuntimeError("Config root must be an object")
-    _unknown_keys(cfg, {"dataset", "runtime", "models", "audit", "dedup", "burst", "semantic", "selection", "validation"}, "root")
+    _unknown_keys(cfg, {"dataset", "runtime", "models", "audit", "dedup", "burst", "semantic", "selection", "validation", "virtual"}, "root")
     required = {"dataset", "runtime", "models", "audit", "dedup", "burst", "semantic", "selection", "validation"}
     missing = sorted(required - set(cfg))
     if missing:
@@ -163,6 +171,28 @@ def load_config(path: Path) -> dict[str, Any]:
     _unknown_keys(sem, {"evidence_floor", "presence_threshold", "availability_capture", "categories", "penalties"}, "semantic")
     _unknown_keys(sel, {"quality_weight", "coverage_weight", "novelty_weight", "coverage_top_groups", "novelty_similarity_start", "redundancy_similarity_start", "redundancy_penalty", "soft_focus_penalty", "semantic_penalty_cap"}, "selection")
     _unknown_keys(val, {"near_duplicate_similarity", "near_duplicate_phash_distance", "same_burst_similarity"}, "validation")
+
+    virtual = cfg.get("virtual", {})
+    if not isinstance(virtual, dict):
+        raise RuntimeError("virtual must be an object")
+    _unknown_keys(virtual, {"face_crop"}, "virtual")
+    face_crop = virtual.get("face_crop", {})
+    if not isinstance(face_crop, dict):
+        raise RuntimeError("virtual.face_crop must be an object")
+    _unknown_keys(face_crop, {"enabled", "model_path", "min_size", "min_face_size", "context_scale", "confidence", "detection_max_side"}, "virtual.face_crop")
+    if face_crop.get("enabled", False):
+        if not str(face_crop.get("model_path", "")).strip():
+            raise RuntimeError("virtual.face_crop.model_path is required when enabled")
+        if int(face_crop.get("min_size", 0)) < 1 or int(face_crop.get("min_face_size", 0)) < 1:
+            raise RuntimeError("virtual.face_crop min_size/min_face_size must be positive")
+        if float(face_crop.get("context_scale", 0.0)) <= 1.0:
+            raise RuntimeError("virtual.face_crop.context_scale must be > 1")
+        _prob(face_crop.get("confidence", 0.0), "virtual.face_crop.confidence")
+        if int(face_crop.get("detection_max_side", 0)) < 1:
+            raise RuntimeError("virtual.face_crop.detection_max_side must be positive")
+        model_path = Path(str(face_crop["model_path"])).expanduser()
+        if not model_path.is_absolute():
+            face_crop["model_path"] = str((path.parent / model_path).resolve())
 
     if int(ds["train"]) < 1 or int(ds["validate"]) < 0:
         raise RuntimeError("dataset.train must be >0 and dataset.validate >=0")
@@ -288,6 +318,22 @@ def open_rgb(path: Path) -> Image.Image:
     with Image.open(path) as im:
         im.load()
         return _rgb_from_loaded(im)
+
+
+def open_record(record: Record) -> Image.Image:
+    """Load the pixels represented by a record, physical or virtual."""
+    image = open_rgb(Path(record.path))
+    if record.crop_box is not None:
+        image = image.crop(record.crop_box)
+    return image
+
+
+def output_name(record: Record) -> str:
+    src = Path(record.path)
+    if record.crop_box is None:
+        return src.name
+    kind = re.sub(r"[^a-zA-Z0-9_-]+", "_", record.kind).strip("_") or "crop"
+    return f"{src.stem}__{kind}{record.view_index}.png"
 
 
 def pad_square(image: Image.Image, neutral: bool) -> Image.Image:
@@ -458,28 +504,140 @@ def capture_time(path: Path, image: Image.Image, cfg: Mapping[str, Any]) -> tupl
     return math.nan, ""
 
 
+def audit_record_pixels(r: Record, rgb: Image.Image, cfg: Mapping[str, Any]) -> Record:
+    r.width, r.height = rgb.size
+    r.min_side = min(rgb.size)
+    r.aspect_ratio = max(rgb.size) / max(1, min(rgb.size))
+    if r.min_side < int(cfg["audit"]["min_side"]):
+        r.reject_reason = "small"
+        return r
+    if r.aspect_ratio > float(cfg["audit"]["max_aspect"]):
+        r.reject_reason = "aspect"
+        return r
+    r.phash = perceptual_hash(rgb)
+    r.laplacian, r.exposure = simple_signals(rgb)
+    r.blur_global, r.blur_center, r.blur_local = blur_signals(rgb)
+    return r
+
+
 def audit_one(path: Path, cfg: Mapping[str, Any]) -> Record:
-    r = Record(path=str(path))
+    source_id = str(path)
+    r = Record(path=source_id, record_id=source_id, source_id=source_id)
     try:
         with Image.open(path) as im:
             im.load()
             r.capture_time, r.capture_source = capture_time(path, im, cfg)
             rgb = _rgb_from_loaded(im)
-        r.width, r.height = rgb.size
-        r.min_side = min(rgb.size)
-        r.aspect_ratio = max(rgb.size) / max(1, min(rgb.size))
-        if r.min_side < int(cfg["audit"]["min_side"]):
-            r.reject_reason = "small"
-            return r
-        if r.aspect_ratio > float(cfg["audit"]["max_aspect"]):
-            r.reject_reason = "aspect"
-            return r
-        r.phash = perceptual_hash(rgb)
-        r.laplacian, r.exposure = simple_signals(rgb)
-        r.blur_global, r.blur_center, r.blur_local = blur_signals(rgb)
+        return audit_record_pixels(r, rgb, cfg)
     except Exception as exc:
         r.reject_reason = f"decode:{type(exc).__name__}"
-    return r
+        return r
+
+
+def make_crop_record(
+    parent: Record,
+    crop_box: tuple[int, int, int, int],
+    kind: str,
+    view_index: int,
+    cfg: Mapping[str, Any],
+    *,
+    detector_confidence: float = math.nan,
+    detected_size: tuple[int, int] = (0, 0),
+) -> Record:
+    """Create and technically audit a virtual crop; reusable by future crop producers."""
+    x1, y1, x2, y2 = map(int, crop_box)
+    record_id = f"{parent.source_id}::{kind}:{view_index}:{x1},{y1},{x2},{y2}"
+    r = Record(
+        path=parent.path, record_id=record_id, source_id=parent.source_id,
+        kind=kind, crop_box=(x1, y1, x2, y2), view_index=view_index,
+        detector_confidence=float(detector_confidence),
+        detected_width=int(detected_size[0]), detected_height=int(detected_size[1]),
+        capture_time=parent.capture_time, capture_source=parent.capture_source,
+        burst_id=parent.burst_id,
+    )
+    try:
+        return audit_record_pixels(r, open_record(r), cfg)
+    except Exception as exc:
+        r.reject_reason = f"decode:{type(exc).__name__}"
+        return r
+
+
+def _square_crop_box(
+    image_size: tuple[int, int],
+    face_box: tuple[float, float, float, float],
+    min_size: int,
+    context_scale: float,
+) -> tuple[int, int, int, int] | None:
+    """Build a native-pixel square crop, shifting inside image bounds instead of truncating."""
+    iw, ih = image_size
+    x, y, w, h = face_box
+    side = max(int(min_size), int(round(max(w, h) * context_scale)))
+    if side > min(iw, ih):
+        return None
+    cx = x + w / 2.0
+    cy = y + h / 2.0 + h * 0.15
+    left = int(round(cx - side / 2.0))
+    top = int(round(cy - side / 2.0))
+    left = min(max(0, left), iw - side)
+    top = min(max(0, top), ih - side)
+    return left, top, left + side, top + side
+
+
+def generate_face_crops(records: Sequence[Record], ids: Sequence[int], cfg: Mapping[str, Any]) -> list[Record]:
+    fc = cfg.get("virtual", {}).get("face_crop", {})
+    if not fc.get("enabled", False):
+        return []
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError("virtual.face_crop requires opencv-python") from exc
+
+    model_path = Path(str(fc["model_path"])).expanduser()
+    if not model_path.is_file():
+        raise RuntimeError(f"YuNet model not found: {model_path}")
+
+    detector = cv2.FaceDetectorYN.create(
+        str(model_path), "", (320, 320),
+        float(fc["confidence"]), 0.3, 5000,
+    )
+    min_size = int(fc["min_size"])
+    min_face = int(fc["min_face_size"])
+    context = float(fc["context_scale"])
+    max_side = int(fc["detection_max_side"])
+    crops: list[Record] = []
+
+    for n, i in enumerate(ids, 1):
+        parent = records[i]
+        image = open_record(parent)
+        scale = min(1.0, max_side / max(image.size))
+        detect = image if scale == 1.0 else image.resize(
+            (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+        bgr = cv2.cvtColor(np.asarray(detect), cv2.COLOR_RGB2BGR)
+        detector.setInputSize((detect.width, detect.height))
+        _, faces = detector.detect(bgr)
+        if faces is None or not len(faces):
+            continue
+
+        # Identity datasets usually have one primary subject; largest credible face is safest.
+        best = max(faces, key=lambda row: float(row[2] * row[3]))
+        x, y, w, h = (float(v) / scale for v in best[:4])
+        confidence = float(best[-1])
+        if max(w, h) < min_face:
+            continue
+        box = _square_crop_box(image.size, (x, y, w, h), min_size, context)
+        if box is None:
+            continue
+        crop = make_crop_record(
+            parent, box, "face_crop", 0, cfg,
+            detector_confidence=confidence, detected_size=(round(w), round(h)),
+        )
+        if not crop.reject_reason:
+            crops.append(crop)
+        if n % 100 == 0 or n == len(ids):
+            print(f"  face crops {n}/{len(ids)} ({len(crops)} candidates)", file=sys.stderr)
+    return crops
 
 
 def assign_bursts(records: list[Record], cfg: Mapping[str, Any]) -> None:
@@ -531,30 +689,31 @@ def assign_prequality(records: list[Record], ids: Sequence[int], cfg: Mapping[st
 
 
 @lru_cache(maxsize=8192)
-def _thumb(path: str) -> np.ndarray:
-    img = open_rgb(Path(path)).resize((128, 128), Image.Resampling.LANCZOS)
+def _thumb(path: str, crop_box: tuple[int, int, int, int] | None) -> np.ndarray:
+    record = Record(path=path, crop_box=crop_box)
+    img = open_record(record).resize((128, 128), Image.Resampling.LANCZOS)
     return np.asarray(img, dtype=np.float32)
 
 
-def pixel_difference(a: str, b: str) -> float:
-    return float(np.mean(np.abs(_thumb(a) - _thumb(b))) / 255.0)
+def pixel_difference(a: Record, b: Record) -> float:
+    return float(np.mean(np.abs(_thumb(a.path, a.crop_box) - _thumb(b.path, b.crop_box))) / 255.0)
 
 
 def phash_dedup(records: list[Record], ids: Sequence[int], cfg: Mapping[str, Any]) -> list[int]:
     radius = int(cfg["dedup"]["phash_distance"]); maxdiff = float(cfg["dedup"]["pixel_difference"])
-    ordered = sorted(ids, key=lambda i: (-records[i].prequality, records[i].path))
+    ordered = sorted(ids, key=lambda i: (-records[i].prequality, records[i].record_id))
     kept: list[int] = []; tree: BKNode | None = None
     for i in ordered:
         value = int(records[i].phash, 16)
         matches = [] if tree is None else tree.find(value, radius)
-        duplicate = next((j for j in matches if pixel_difference(records[i].path, records[j].path) <= maxdiff), None)
+        duplicate = next((j for j in matches if pixel_difference(records[i], records[j]) <= maxdiff), None)
         if duplicate is not None:
             records[i].reject_reason = "phash_duplicate"
             continue
         kept.append(i)
         if tree is None: tree = BKNode(value, i)
         else: tree.add(value, i)
-    return sorted(kept, key=lambda i: records[i].path)
+    return sorted(kept, key=lambda i: records[i].record_id)
 
 
 def resolve_device(requested: str) -> str:
@@ -565,15 +724,15 @@ def resolve_device(requested: str) -> str:
     return "cpu"
 
 
-def dino_embeddings(paths: Sequence[str], model_name: str, device: str, batch_size: int) -> np.ndarray:
+def dino_embeddings(records: Sequence[Record], model_name: str, device: str, batch_size: int) -> np.ndarray:
     import torch
     from transformers import AutoImageProcessor, AutoModel
     processor = AutoImageProcessor.from_pretrained(model_name)
     model = AutoModel.from_pretrained(model_name).to(device).eval()
     result: np.ndarray | None = None
-    for start in range(0, len(paths), batch_size):
-        batch_paths = paths[start:start+batch_size]
-        images = [pad_square(open_rgb(Path(p)), True).resize((224, 224), Image.Resampling.LANCZOS) for p in batch_paths]
+    for start in range(0, len(records), batch_size):
+        batch_records = records[start:start+batch_size]
+        images = [pad_square(open_record(r), True).resize((224, 224), Image.Resampling.LANCZOS) for r in batch_records]
         inputs = processor(images=images, return_tensors="pt", do_resize=False, do_center_crop=False)
         inputs = {k: v.to(device) for k, v in inputs.items()}
         with torch.inference_mode():
@@ -582,9 +741,9 @@ def dino_embeddings(paths: Sequence[str], model_name: str, device: str, batch_si
             if feat is None: feat = out.last_hidden_state[:, 0]
             feat = torch.nn.functional.normalize(feat.float(), dim=1)
         arr = feat.cpu().numpy().astype(np.float32, copy=False)
-        if result is None: result = np.empty((len(paths), arr.shape[1]), np.float32)
+        if result is None: result = np.empty((len(records), arr.shape[1]), np.float32)
         result[start:start+len(arr)] = arr
-        print(f"  DINO {min(start+batch_size,len(paths))}/{len(paths)}", file=sys.stderr)
+        print(f"  DINO {min(start+batch_size,len(records))}/{len(records)}", file=sys.stderr)
     del model
     if device == "cuda": torch.cuda.empty_cache()
     return np.empty((0, 0), np.float32) if result is None else result
@@ -604,7 +763,7 @@ def semantic_dedup(records: list[Record], ids: Sequence[int], emb: np.ndarray, c
     distances, neighbors = nn.radius_neighbors(emb, return_distance=True)
     ordered = sorted(
         range(len(ids)),
-        key=lambda pos: (-records[ids[pos]].prequality, records[ids[pos]].path),
+        key=lambda pos: (-records[ids[pos]].prequality, records[ids[pos]].record_id),
     )
     kept_positions: set[int] = set()
     keep_pos: list[int] = []
@@ -713,7 +872,7 @@ def wd14_scores(records: Sequence[Record], ids: Sequence[int], cfg: Mapping[str,
     batch_size = int(cfg["runtime"]["batch_size"])
     for start in range(0, len(ids), batch_size):
         chunk = ids[start:start+batch_size]
-        images = [pad_square(open_rgb(Path(records[i].path)), False) for i in chunk]
+        images = [pad_square(open_record(records[i]), False) for i in chunk]
         tensor = torch.stack([transform(im) for im in images])[:, [2,1,0], :, :].to(device)
         with torch.inference_mode():
             logits = model(tensor)
@@ -755,7 +914,7 @@ def compute_brisque(records: list[Record], ids: Sequence[int], device: str, enab
         return False
     for n, i in enumerate(ids, 1):
         try:
-            img = open_rgb(Path(records[i].path))
+            img = open_record(records[i])
             if max(img.size) > 768:
                 scale = 768/max(img.size); img = img.resize(tuple(max(32, round(v*scale)) for v in img.size), Image.Resampling.LANCZOS)
             arr = np.asarray(img, np.float32)/255.0
@@ -799,11 +958,17 @@ def coverage_targets(raw: np.ndarray, evidence: np.ndarray, specs: Sequence[Sema
     return targets
 
 
-def semantic_penalties(raw_penalty: np.ndarray, specs: Sequence[SemanticSpec], cfg: Mapping[str, Any]) -> np.ndarray:
+def semantic_penalties(raw_penalty: np.ndarray, specs: Sequence[SemanticSpec], cfg: Mapping[str, Any], records: Sequence[Record] | None = None) -> np.ndarray:
     ev = evidence_transform(raw_penalty, cfg)
     weights = np.asarray([s.weight for s in specs], np.float32)
+    weighted = ev * weights[None, :]
+    if records is not None:
+        # Intentional crops should not be punished merely because extremities are out of frame.
+        for j, spec in enumerate(specs):
+            if spec.name == "cropped_extremities":
+                weighted[[i for i, r in enumerate(records) if r.crop_box is not None], j] = 0.0
     cap = float(cfg["selection"]["semantic_penalty_cap"])
-    return np.clip(ev @ weights, 0.0, cap).astype(np.float32)
+    return np.clip(weighted.sum(axis=1), 0.0, cap).astype(np.float32)
 
 
 def hard_semantic_reject(raw_penalty: np.ndarray, specs: Sequence[SemanticSpec]) -> np.ndarray:
@@ -969,7 +1134,8 @@ def validation_pool(records: Sequence[Record], eligible: Sequence[int], training
     if not len(train): return list(eligible), np.full(len(records), -1.0, np.float32)
     max_sim = np.full(len(records), -1.0, np.float32)
     training_set = set(training)
-    candidates = [i for i in eligible if i not in training_set]
+    training_sources = {records[i].source_id for i in training}
+    candidates = [i for i in eligible if i not in training_set and records[i].source_id not in training_sources]
     if not candidates: return [], max_sim
     train_matrix = embeddings[train]
     cand_arr = np.asarray(candidates, np.int64)
@@ -1011,7 +1177,7 @@ def write_debug_csv(
     """Write one compact per-image tuning table; does not affect selection."""
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    compact_pos = {r.path: i for i, r in enumerate(compact_records)}
+    compact_pos = {r.record_id: i for i, r in enumerate(compact_records)}
     eligible_set, train_set, val_set = set(eligible), set(train), set(validate)
 
     selected = list(train) + list(validate)
@@ -1031,10 +1197,11 @@ def write_debug_csv(
             j = int(np.argmax(row))
             if row[j] > -0.5:
                 nearest_sim[i] = float(row[j])
-                nearest_name[i] = Path(compact_records[int(selected_arr[j])].path).name
+                nearest_name[i] = output_name(compact_records[int(selected_arr[j])])
 
     fields = [
-        "file", "path", "status", "reject_reason",
+        "file", "path", "record_id", "source_id", "kind", "crop_box", "status", "reject_reason",
+        "detector_confidence", "detected_width", "detected_height",
         "width", "height", "min_side", "aspect_ratio",
         "capture_source", "burst_id",
         "phash", "laplacian", "exposure",
@@ -1051,7 +1218,7 @@ def write_debug_csv(
         writer.writeheader()
 
         for r in all_records:
-            p = compact_pos.get(r.path)
+            p = compact_pos.get(r.record_id)
             if p is None:
                 status = "rejected"
             elif p in train_set:
@@ -1064,9 +1231,16 @@ def write_debug_csv(
                 status = "rejected"
 
             row = {
-                "file": Path(r.path).name,
+                "file": output_name(r),
                 "path": r.path,
+                "record_id": r.record_id,
+                "source_id": r.source_id,
+                "kind": r.kind,
+                "crop_box": ("" if r.crop_box is None else ",".join(map(str, r.crop_box))),
                 "status": status,
+                "detector_confidence": (r.detector_confidence if math.isfinite(r.detector_confidence) else ""),
+                "detected_width": (r.detected_width or ""),
+                "detected_height": (r.detected_height or ""),
                 "reject_reason": r.reject_reason,
                 "width": r.width,
                 "height": r.height,
@@ -1105,12 +1279,18 @@ def materialize(records: Sequence[Record], ids: Sequence[int], folder: Path, mod
     folder.mkdir(parents=True)
     used: set[str] = set()
     for i in ids:
-        src = Path(records[i].path); name = src.name
+        record = records[i]
+        src = Path(record.path)
+        name = output_name(record)
         if name.lower() in used:
-            suffix = hashlib.sha1(str(src).encode()).hexdigest()[:8]
-            name = f"{src.stem}__{suffix}{src.suffix}"
-        used.add(name.lower()); dst = folder/name
-        if mode == "copy": shutil.copy2(src, dst)
+            suffix = hashlib.sha1(record.record_id.encode()).hexdigest()[:8]
+            stem, ext = Path(name).stem, Path(name).suffix
+            name = f"{stem}__{suffix}{ext}"
+        used.add(name.lower())
+        dst = folder / name
+        if record.crop_box is not None:
+            open_record(record).save(dst, format="PNG")
+        elif mode == "copy": shutil.copy2(src, dst)
         elif mode == "hardlink": os.link(src, dst)
         else: os.symlink(src, dst)
 
@@ -1146,14 +1326,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     with ThreadPoolExecutor(max_workers=workers) as ex:
         records = list(ex.map(lambda p: audit_one(p, cfg), paths))
     assign_bursts(records, cfg)
+    original_basic = [i for i, r in enumerate(records) if not r.reject_reason]
+    if not original_basic: raise RuntimeError("No images survive basic audit")
+    virtual = generate_face_crops(records, original_basic, cfg)
+    if virtual:
+        records.extend(virtual)
+        print(f"  virtual face crops: {len(virtual)}", file=sys.stderr)
     basic = [i for i, r in enumerate(records) if not r.reject_reason]
-    if not basic: raise RuntimeError("No images survive basic audit")
     assign_prequality(records, basic, cfg)
-    print(f"  basic eligible: {len(basic)}", file=sys.stderr)
+    print(f"  basic eligible: {len(basic)} ({len(original_basic)} originals + {len(virtual)} virtual)", file=sys.stderr)
 
     phash_ids = phash_dedup(records, basic, cfg)
     print(f"  pHash survivors: {len(phash_ids)}", file=sys.stderr)
-    emb0 = dino_embeddings([records[i].path for i in phash_ids], cfg["models"]["embedding"], device, int(cfg["runtime"]["batch_size"]))
+    emb0 = dino_embeddings([records[i] for i in phash_ids], cfg["models"]["embedding"], device, int(cfg["runtime"]["batch_size"]))
     semantic_ids, emb1 = semantic_dedup(records, phash_ids, emb0, cfg)
     print(f"  DINO near-duplicate survivors: {len(semantic_ids)}", file=sys.stderr)
 
@@ -1183,7 +1368,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     brisque_ok = compute_brisque(compact_records, eligible, device, bool(cfg["audit"]["brisque"]["enabled"]))
     assign_quality(compact_records, eligible, cfg, brisque_ok)
-    penalties_score = semantic_penalties(raw_pen, penalties, cfg)
+    penalties_score = semantic_penalties(raw_pen, penalties, cfg, compact_records)
     # Ineligible rows are never selected; quality value does not matter there.
 
     train, train_cov, train_targets = select_greedy(compact_records, eligible, embeddings, raw_cat, categories, penalties_score, int(cfg["dataset"]["train"]), cfg)
